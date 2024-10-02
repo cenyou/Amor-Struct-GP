@@ -66,7 +66,7 @@ def cal_marg_likelihood_batch_noise(K, f, noise_variances, kernel_mask, diagonal
     return AvgMLL, True
 
 
-def GP_noise(y1, K11, K12, K22, epsilon_noise, device=torch.device("cpu")):
+def GP_noise(y1, K11, K12, K22, epsilon_noise, device=torch.device("cpu"), diag=False):
     """
     Source: https://github.com/PrincetonLIPS/AHGP Licensed under the MIT License
     Calculate the posterior mean and covariance matrix for y2 based on the noisy observations y1 and the given kernel matrix
@@ -74,11 +74,15 @@ def GP_noise(y1, K11, K12, K22, epsilon_noise, device=torch.device("cpu")):
     # y1: N_train x 1
     # K11: N_train x N_train
     # K12: N_train x N_test
-    # K22: N_test x N_test
+    # K22: N_test x N_test or N_test
     # Kernel of the noisy observations
     K11 = K11 + epsilon_noise * torch.eye(K11.shape[0]).to(device)
-    solved = torch.linalg.solve(K11, K12)
+    solved = torch.linalg.solve(K11, K12) # N_train x N_test
     # Compute posterior mean
     mu_2 = torch.matmul(solved.T, y1)
-    var_2 = K22 - torch.matmul(solved.T, K12)
-    return mu_2, var_2  # mean, covariance
+    if diag:
+        var_2 = K22 - torch.mul(solved, K12).sum(-2)
+        return mu_2, var_2  # mean, variance
+    else:
+        var_2 = K22 - torch.matmul(solved.T, K12)
+        return mu_2, var_2  # mean, covariance

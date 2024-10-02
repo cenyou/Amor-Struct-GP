@@ -328,16 +328,15 @@ class BasicDimWiseAdditiveAmortizedInferenceModel(nn.Module):
             X_unsqueezed, X_test_unsqueezed, kernel_embeddings, kernel_list, untransformed_kernel_params
         )  # 1 x N_train x N_test
         K_test = self.kernel_wrapper.forward(
-            X_test_unsqueezed, X_test_unsqueezed, kernel_embeddings, kernel_list, untransformed_kernel_params
-        )  # 1 x N_test x N_test
+            X_test_unsqueezed, X_test_unsqueezed, kernel_embeddings, kernel_list, untransformed_kernel_params, diag=True
+        )  # 1 x N_test
         noise_variance = noise_variances.squeeze()
-        mu_test, covar_test = GP_noise(
-            y_unsqueezed.squeeze(0), K_train.squeeze(0), K_train_test.squeeze(0), K_test.squeeze(0), noise_variance, device
+        mu_test, var_f_test = GP_noise(
+            y_unsqueezed.squeeze(0), K_train.squeeze(0), K_train_test.squeeze(0), K_test.squeeze(0), noise_variance, device, diag=True
         )
         mu_test = mu_test.detach().cpu().numpy()  # shape N_test
-        covar_test = covar_test.detach().cpu().numpy()
+        var_f_test = var_f_test.detach().cpu().numpy()
         noise_variance = noise_variance.detach().cpu().numpy()
-        var_f_test = np.diag(covar_test)
         var_y_test = var_f_test + noise_variance
         sigma_f_test = np.sqrt(var_f_test)  # shape N_test
         sigma_y_test = np.sqrt(var_y_test)  # shape N_test

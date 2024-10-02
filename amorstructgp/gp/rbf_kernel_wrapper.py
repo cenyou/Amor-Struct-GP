@@ -48,10 +48,10 @@ class SEKernelOnlyLengthscale(nn.Module, BaseKernel):
     def set_eval_mode(self, eval_mode: BaseKernelEvalMode):
         self.eval_mode = eval_mode
 
-    def forward(self, X1, X2, kernel_embedding, untransformed_params=None):
+    def forward(self, X1, X2, kernel_embedding, untransformed_params=None, diag: bool=False):
         # x1: N1 x D
         lengthscale = self._get_parameters(kernel_embedding, untransformed_params)
-        sq_distances = squared_dist(X1, X2, lengthscale, 0)
+        sq_distances = squared_dist(X1, X2, lengthscale, 0, diag=diag)
         K = torch.exp(-0.5 * sq_distances)
         return K
 
@@ -110,7 +110,7 @@ class ConstantKernel(nn.Module, BaseKernel):
     def set_eval_mode(self, eval_mode: BaseKernelEvalMode):
         self.eval_mode = eval_mode
 
-    def forward(self, X1, X2, kernel_embedding, untransformed_params=None):
+    def forward(self, X1, X2, kernel_embedding, untransformed_params=None, diag: bool=False):
         # x1: N1 x D
         n1 = len(X1)
         n2 = len(X2)
@@ -185,6 +185,7 @@ class RBFKernelWrapper(nn.Module):
         kernel_embeddings: torch.tensor,
         kernel_type_list: Optional[KernelTypeList],
         untransformed_params: Optional[KernelParameterNestedList] = None,
+        diag: bool=False,
     ):
         """
         Arguments:
@@ -199,11 +200,11 @@ class RBFKernelWrapper(nn.Module):
         D = len(kernel_type_list)
         for d in range(0, D):
             kernel_gram_at_d = self.se_kernel.forward(
-                X1[:, d].unsqueeze(-1), X2[:, d].unsqueeze(-1), kernel_embeddings[d, 0, :], self.eval_param_list(untransformed_params, d, 0)
+                X1[:, d].unsqueeze(-1), X2[:, d].unsqueeze(-1), kernel_embeddings[d, 0, :], self.eval_param_list(untransformed_params, d, 0), diag=diag
             )
             kernel_grams.append(kernel_gram_at_d)
         global_kernel_embedding = self.get_global_kernel_embedding(kernel_embeddings, D)
-        constant = self.const_kernel.forward(X1, X2, global_kernel_embedding, self.eval_param_list(untransformed_params, d + 1, 0))
+        constant = self.const_kernel.forward(X1, X2, global_kernel_embedding, self.eval_param_list(untransformed_params, d + 1, 0), diag=diag)
         # kernel_grams.append(constant_gram)
         K = constant * torch.prod(torch.stack(kernel_grams), dim=0)  # N1 x N2
         return K

@@ -163,15 +163,19 @@ class BaseKernel:
         raise NotImplementedError
 
 
-def squared_dist(X1, X2, lengthscale, clamp_min):
+def squared_dist(X1, X2, lengthscale, clamp_min, diag: bool=False):
     """
     Source: https://github.com/PrincetonLIPS/AHGP Licensed under the MIT License
     """
+    assert (not diag) or (X1.shape==X2.shape)
     X1 = X1.div(lengthscale)
     X2 = X2.div(lengthscale)
-    X1_norm = torch.sum(X1**2, dim=-1).unsqueeze(-1)  # B X N1 X 1
-    X2_norm = torch.sum(X2**2, dim=-1).unsqueeze(-2)  # B X 1 X N2
-    Distance_squared = (X1_norm + X2_norm - 2 * torch.matmul(X1, X2.transpose(-1, -2))).clamp_min_(clamp_min)
+    if diag:
+        Distance_squared = torch.sum((X1 - X2)**2, dim=-1).clamp_min_(clamp_min)  # B X N
+    else:
+        X1_norm = torch.sum(X1**2, dim=-1).unsqueeze(-1)  # B X N1 X 1
+        X2_norm = torch.sum(X2**2, dim=-1).unsqueeze(-2)  # B X 1 X N2
+        Distance_squared = (X1_norm + X2_norm - 2 * torch.matmul(X1, X2.transpose(-1, -2))).clamp_min_(clamp_min)
     return Distance_squared
 
 
@@ -200,10 +204,10 @@ class SEKernel(nn.Module, BaseKernel):
     def set_eval_mode(self, eval_mode: BaseKernelEvalMode):
         self.eval_mode = eval_mode
 
-    def forward(self, X1, X2, kernel_embedding, untransformed_params=None):
+    def forward(self, X1, X2, kernel_embedding, untransformed_params=None, diag: bool=False):
         # x1: N1 x D
         lengthscale, variance = self._get_parameters(kernel_embedding, untransformed_params)
-        sq_distances = squared_dist(X1, X2, lengthscale, 0)
+        sq_distances = squared_dist(X1, X2, lengthscale, 0, diag=diag)
         K = torch.pow(variance, 2.0) * torch.exp(-0.5 * sq_distances)
         return K
 
@@ -276,10 +280,10 @@ class MaternKernel(nn.Module, BaseKernel):
     def get_variance_prior(self):
         return torch.distributions.Gamma(self.a_variance, self.b_variance)
 
-    def forward(self, X1, X2, kernel_embedding, untransformed_params=None):
+    def forward(self, X1, X2, kernel_embedding, untransformed_params=None, diag: bool=False):
         # x1: N1 x D
         lengthscale, variance = self._get_parameters(kernel_embedding, untransformed_params)
-        sq_distances = squared_dist(X1, X2, lengthscale, 1e-6)
+        sq_distances = squared_dist(X1, X2, lengthscale, 1e-6, diag=diag)
         distance = torch.sqrt(sq_distances)
         exp_component = torch.exp(-math.sqrt(self.nu * 2) * distance)
         if self.nu == 1.5:
@@ -363,14 +367,18 @@ class PeriodicKernel(nn.Module, BaseKernel):
     def get_period_prior(self):
         return torch.distributions.Gamma(self.a_period, self.b_period)
 
-    def forward(self, X1, X2, kernel_embedding, untransformed_params=None):
+    def forward(self, X1, X2, kernel_embedding, untransformed_params=None, diag: bool=False):
+        assert (not diag) or (X1.shape == X2.shape)
         # x1: N1 x D
         # x2: N2 x D
         lengthscale, variance, period = self._get_parameters(kernel_embedding, untransformed_params)
-        X1 = X1.div(period).unsqueeze(-2)  # N X 1 X D
-        X2 = X2.div(period).unsqueeze(-3)  # 1 x N x D
-        X_diff = torch.abs(X1 - X2)  # N x N x D
-        K = (-0.5 * (torch.sin(math.pi * X_diff) ** 2) / lengthscale**2).exp_()  # N1 X N2 X D
+        X1 = X1.div(period)  # N x D
+        X2 = X2.div(period)  # N x D
+        if not diag:
+            X1 = X1.unsqueeze(-2)  # N x 1 x D
+            X2 = X2.unsqueeze(-3)  # 1 x N x D
+        X_diff = torch.abs(X1 - X2)  # N x N x D or N x D
+        K = (-0.5 * (torch.sin(math.pi * X_diff) ** 2) / lengthscale**2).exp_()  # N x N x D or N x D
         K = torch.pow(variance, 2.0) * torch.prod(K, -1)
         return K
 
@@ -446,11 +454,15 @@ class LinearKernel(nn.Module, BaseKernel):
     def get_offset_prior(self):
         return torch.distributions.Gamma(self.a_offset, self.b_offset)
 
-    def forward(self, X1, X2, kernel_embedding, untransformed_params=None):
+    def forward(self, X1, X2, kernel_embedding, untransformed_params=None, diag: bool=False):
+        assert (not diag) or (X1.shape == X2.shape)
         # x1: N1 x D
         # x2: N2 x D
         offset, variance = self._get_parameters(kernel_embedding, untransformed_params)
-        K = torch.pow(variance, 2.0) * torch.matmul(X1, X2.transpose(-1, -2)) + offset
+        if diag:
+            K = torch.pow(variance, 2.0) * torch.mul(X1, X2).sum(-1) + offset
+        else:
+            K = torch.pow(variance, 2.0) * torch.matmul(X1, X2.transpose(-1, -2)) + offset
         return K
 
     def _get_parameters(self, kernel_embedding, untransformed_params):
@@ -502,9 +514,11 @@ class KernelAddition(nn.Module, BaseKernel):
         self.kernel2 = kernel2
         self.eval_param_list = lambda params, i: None if params is None else params[i]
 
-    def forward(self, x1, x2, kernel_embedding, untransformed_params=None):
-        K = self.kernel1.forward(x1, x2, kernel_embedding, self.eval_param_list(untransformed_params, 0)) + self.kernel2.forward(
-            x1, x2, kernel_embedding, self.eval_param_list(untransformed_params, 1)
+    def forward(self, x1, x2, kernel_embedding, untransformed_params=None, diag: bool=False):
+        K = self.kernel1.forward(
+            x1, x2, kernel_embedding, self.eval_param_list(untransformed_params, 0), diag=diag
+        ) + self.kernel2.forward(
+            x1, x2, kernel_embedding, self.eval_param_list(untransformed_params, 1), diag=diag
         )
         return K
 
@@ -540,9 +554,11 @@ class KernelMultiplication(nn.Module, BaseKernel):
         self.kernel1.set_eval_mode(eval_mode)
         self.kernel2.set_eval_mode(eval_mode)
 
-    def forward(self, x1, x2, kernel_embedding, untransformed_params=None):
-        K = self.kernel1.forward(x1, x2, kernel_embedding, self.eval_param_list(untransformed_params, 0)) * self.kernel2.forward(
-            x1, x2, kernel_embedding, self.eval_param_list(untransformed_params, 1)
+    def forward(self, x1, x2, kernel_embedding, untransformed_params=None, diag: bool=False):
+        K = self.kernel1.forward(
+            x1, x2, kernel_embedding, self.eval_param_list(untransformed_params, 0), diag=diag
+        ) * self.kernel2.forward(
+            x1, x2, kernel_embedding, self.eval_param_list(untransformed_params, 1), diag=diag
         )
         return K
 
@@ -649,6 +665,7 @@ class DimWiseAdditiveKernelWrapper(nn.Module):
         kernel_embeddings: torch.tensor,
         kernel_type_list: KernelTypeList,
         untransformed_params: Optional[KernelParameterNestedList] = None,
+        diag: bool=False,
     ):
         """
         The main forward method gets besides the input data X1 and X2 as input the kernel description in form of a nested list kernel_type_list (KernelTypeList): List[List[BaseKernelTypes]]
@@ -664,6 +681,7 @@ class DimWiseAdditiveKernelWrapper(nn.Module):
             kernel_type_list: nested list with BaseKernelTypes elements specifying the kernel structure where the first list is over dimension and the second specifies the base kernels inside each dimension
             untransformed_params: nested list that mirros the nested structure of kernel_type_list but each element contains BaseKernelParameterFormat elements - with this the
                 kernel can be evaluated with parameters directly rather than embeddings (can be used for warm start learning for example)
+            diag: flag if we compute diagonal element only, if True, N1==N2 is required
         """
 
         kernel_grams = []
@@ -676,6 +694,7 @@ class DimWiseAdditiveKernelWrapper(nn.Module):
                     X2[:, d].unsqueeze(-1),
                     kernel_embeddings[d, i, :],
                     self.eval_param_list(untransformed_params, d, i),
+                    diag=diag,
                 )
                 for i, kernel_type in enumerate(kernel_list_per_dim)
             ]
@@ -683,7 +702,7 @@ class DimWiseAdditiveKernelWrapper(nn.Module):
             kernel_gram_at_d = torch.sum(torch.stack(kernel_grams_per_dim), dim=0)
             kernel_grams.append(kernel_gram_at_d)
         # multiply the gram matrices of all dimensions
-        K = torch.prod(torch.stack(kernel_grams), dim=0)  # N1 x N2
+        K = torch.prod(torch.stack(kernel_grams), dim=0)  # N1 x N2 or N
         return K
 
     def get_log_prior_prob(
@@ -778,6 +797,7 @@ class BatchedDimWiseAdditiveKernelWrapper(nn.Module):
         kernel_embeddings: torch.tensor,
         kernel_type_list: List[KernelTypeList],
         untransformed_params: Optional[List[KernelParameterNestedList]] = None,
+        diag: bool=False,
     ):
         # kernel_embeddings: B x D x N_k x d_h
         # X1: B x N1 x D
@@ -786,12 +806,12 @@ class BatchedDimWiseAdditiveKernelWrapper(nn.Module):
         K_batch = torch.stack(
             [
                 self.dim_wise_additive_kernel_wrapper.forward(
-                    X1[b], X2[b], kernel_embeddings[b], kernel_type_list[b], self.eval_param_list(untransformed_params, b)
+                    X1[b], X2[b], kernel_embeddings[b], kernel_type_list[b], self.eval_param_list(untransformed_params, b), diag=diag
                 )
                 for b in range(batch_size)
             ]
         )
-        return K_batch  # B X N1 X N2
+        return K_batch  # B X N1 X N2 or B X N
 
     def get_log_prior_prob(
         self,

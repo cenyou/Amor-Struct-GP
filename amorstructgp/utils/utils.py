@@ -221,5 +221,9 @@ def check_array_bounds(arr):
     return np.all((arr >= 0.0) & (arr <= 1.0))
 
 
+def normal_entropy(sigma):
+    entropy = np.log(sigma * np.sqrt(2 * np.pi * np.exp(1)))
+    return entropy
+
 if __name__ == "__main__":
     pass

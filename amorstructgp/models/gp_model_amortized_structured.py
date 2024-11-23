@@ -30,8 +30,10 @@ from amorstructgp.models.base_model import BaseModel
 import numpy as np
 from amorstructgp.gp.base_kernels import BaseKernelEvalMode, BaseKernelTypes
 from amorstructgp.utils.enums import PredictionQuantity
+from amorstructgp.utils.utils import normal_entropy
 from scipy.stats import norm
 import torch
+import time
 
 
 class GPModelAmortizedStructured(BaseModel):
@@ -58,6 +60,7 @@ class GPModelAmortizedStructured(BaseModel):
         self.infered_untransformed_parameters = None
         self.infered_K_train = None
         self.infered_noise_variance = None
+        self.last_inference_time = 0
         self.model: BasicDimWiseAdditiveAmortizedInferenceModel = None
         self.device = torch.device("cpu")
 
@@ -109,7 +112,7 @@ class GPModelAmortizedStructured(BaseModel):
         assert self.kernel_list is not None
         n_dim = x_data.shape[1]
         X_list = [x_data]
-        y_list = [np.squeeze(y_data)]
+        y_list = [np.squeeze(y_data, axis=-1)]
         kernel_list = self.create_input_kernel_list(self.kernel_list, n_dim)
         print(kernel_list)
         (
@@ -140,9 +143,10 @@ class GPModelAmortizedStructured(BaseModel):
         assert self.model is not None
         assert self.kernel_list is not None
         assert check_array_bounds(x_data)
+        t0 = time.perf_counter()
         n_dim = x_data.shape[1]
         X_list = [x_data]
-        y_list = [np.squeeze(y_data)]
+        y_list = [np.squeeze(y_data, axis=-1)]
         kernel_list = self.create_input_kernel_list(self.kernel_list, n_dim)
         print(kernel_list)
         (
@@ -174,6 +178,7 @@ class GPModelAmortizedStructured(BaseModel):
             self.infered_untransformed_parameters = untransformed_kernel_params
             print("Untransformed params:" + str(self.infered_untransformed_parameters))
         else:
+            #assert False, (X_unsqueezed.shape, y_unsqueezed.shape)
             kernel_embeddings, K_train, nmll, _, noise_variances, _, _, _ = self.model.forward(
                 X_unsqueezed,
                 y_unsqueezed,
@@ -191,7 +196,12 @@ class GPModelAmortizedStructured(BaseModel):
         self.cached_x_data = X_unsqueezed
         self.cached_y_data = y_unsqueezed
         self.infered_noise_variance = noise_variances
+        t_end = time.perf_counter()
+        self.last_inference_time = t_end - t0
         print("Negative-Log-marginal-likelihood: {}".format(nmll))
+
+    def get_last_inference_time(self):
+        return self.last_inference_time
 
     def predictive_dist(self, x_test: np.array) -> Tuple[np.array, np.array]:
         mu_test, sigma_f_test, sigma_y_test = self.predict(x_test)
@@ -230,7 +240,7 @@ class GPModelAmortizedStructured(BaseModel):
         return log_likelis
 
     def reset_model(self):
-        raise NotImplementedError
+        pass
 
     def clear_cache(self):
         self.kernel_list = None
@@ -246,4 +256,6 @@ class GPModelAmortizedStructured(BaseModel):
         raise NotImplementedError
 
     def entropy_predictive_dist(self, x_test: np.array) -> np.array:
-        raise NotImplementedError
+        mu_test, _, sigma_y_test = self.predict(x_test)
+        entropies = normal_entropy(sigma_y_test)
+        return entropies

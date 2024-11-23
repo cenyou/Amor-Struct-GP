@@ -29,6 +29,7 @@ from amorstructgp.nn.amortized_models_factory import AmortizedModelsFactory
 from amorstructgp.models.base_model import BaseModel
 import torch
 import numpy as np
+import time
 
 from amorstructgp.utils.gaussian_mixture_density import EntropyApproximation, GaussianMixtureDensity
 from amorstructgp.utils.utils import check_array_bounds
@@ -54,6 +55,7 @@ class GPModelAmortizedEnsemble(BaseModel):
         self.infered_log_marginal_likelis = None
         self.n_ensemble = 0
         self.fast_batch_inference = True
+        self.last_inference_time = 0
         self.model: BasicDimWiseAdditiveAmortizedInferenceModel = None
         self.device = torch.device("cpu")
 
@@ -90,21 +92,25 @@ class GPModelAmortizedEnsemble(BaseModel):
                 new_kernel_list.append(kernel_list_over_dim)
             return new_kernel_list
 
+    def reset_model(self):
+        pass
+
     def infer(self, x_data: np.array, y_data: np.array):
         assert self.model is not None
         assert self.kernel_list is not None
         assert check_array_bounds(x_data)
+        t0 = time.perf_counter()
         n_dim = x_data.shape[1]
         kernel_list = self.create_input_kernel_list(self.kernel_list, n_dim)
         print(kernel_list)
         n_data = x_data.shape[0]
         if self.fast_batch_inference:
             X_list = [x_data]
-            y_list = [np.squeeze(y_data)]
+            y_list = [np.squeeze(y_data, axis=-1)]
             model_forward_func = self.model.forward_ensemble
         else:
             X_list = [x_data for i in range(0, self.n_ensemble)]
-            y_list = [np.squeeze(y_data) for i in range(0, self.n_ensemble)]
+            y_list = [np.squeeze(y_data, axis=-1) for i in range(0, self.n_ensemble)]
             model_forward_func = self.model.forward
         (
             kernel_mask,
@@ -138,7 +144,12 @@ class GPModelAmortizedEnsemble(BaseModel):
         # subtract max log marignal likeli for numerical stability of softmax
         unnnormalized_ensemble_weights = np.exp(self.infered_log_marginal_likelis - max_log_marginal_likeli)
         self.ensemble_weights = unnnormalized_ensemble_weights / np.sum(unnnormalized_ensemble_weights)
+        t_end = time.perf_counter()
+        self.last_inference_time = t_end - t0
         print("Negative-Log-marginal-likelihood: {}".format(nmll))
+
+    def get_last_inference_time(self):
+        return self.last_inference_time
 
     def predict(self, x_test: np.array) -> Tuple[np.array, np.array]:
         assert x_test.shape[1] == self.cached_x_data.shape[2]
